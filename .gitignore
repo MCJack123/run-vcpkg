@@ -12,3 +12,4 @@ build
 !dist
 .npmrc
 coverage
+.DS_Store

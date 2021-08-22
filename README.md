@@ -188,7 +188,3 @@ The dependencies specified in the vcpkg.json file are installed when CMake runs 
  All the content in this repository is licensed under the [MIT License](LICENSE.txt).
 
 Copyright (c) 2019-2020-2021 Luca Cappa
-
-# Donating
-
-Other than submitting a pull request, [donating](paypal.me/lucappa) is another way to contribute to this project.

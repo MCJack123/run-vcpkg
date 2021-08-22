@@ -17,9 +17,8 @@ async function main(): Promise<void> {
   try {
     await baseUtil.wrapOp('Save vcpkg and its artifacts to cache',
       async () => {
-        // Caching in the post action happens only when in 'setupOnly:true' mode.
         if (core.getState(vcpkgaction.VCPKG_DO_CACHE_ON_POST_ACTION_KEY) !== "true") {
-          core.info("Skipping saving cache since the input 'setupOnly' is not set to true.");
+          core.info("Skipping saving cache.");
           return;
         } else {
           // Inputs are re-evaluted before the post action, so we want the original key used for restore

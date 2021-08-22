@@ -3,7 +3,6 @@ import * as fs from 'fs'
 import * as vcpkgaction from '../src/vcpkg-action'
 import * as actionlib from '@lukka/action-lib'
 import * as cache from '@actions/cache'
-import * as core from '@actions/core'
 import * as runvcpkglib from '@lukka/run-vcpkg-lib'
 import * as path from 'path'
 import * as baseutil from '@lukka/base-util-lib'
@@ -14,16 +13,6 @@ jest.setTimeout(15 * 1000);
 jest.mock("@lukka/action-lib");
 // Mocks entire run-vcpkg-lib module.
 jest.mock("@lukka/run-vcpkg-lib");
-
-function createDir(path: string) {
-    try {
-        fs.mkdirSync(path, { recursive: true });
-    } catch (err) {
-        if (err.code !== 'EEXIST') {
-            throw err
-        }
-    }
-}
 
 function clearInputs(): void {
     Object.keys(process.env)
@@ -52,13 +41,13 @@ afterEach(() => {
 afterAll(async () => {
 });
 
-test('run-vcpkg: basic run scenario test', async () => {
+test('run-vcpkg: basic run', async () => {
     const vcpkg: vcpkgaction.VcpkgAction = new vcpkgaction.VcpkgAction(
         new baseutil.BaseUtilLib(new actionlib.ActionLib()));
     await vcpkg.run();
 });
 
-test('run-vcpkg: cache hit scenario test', async () => {
+test('run-vcpkg: cache hit', async () => {
     // Arrange.
     const saveCacheSpy = jest.spyOn(cache, "saveCache").mockImplementation(
         function (a, b, c): Promise<number> {
@@ -84,7 +73,7 @@ test('run-vcpkg: cache hit scenario test', async () => {
     keyMatchMock.mockRestore();
 });
 
-test('run-vcpkg: cache miss scenario test', async () => {
+test('run-vcpkg: cache miss', async () => {
     // Arrange.
     const saveCacheSpy = jest.spyOn(cache, "saveCache").mockImplementation(
         function (a, b, c): Promise<number> { return Promise.resolve(42); });
@@ -100,13 +89,14 @@ test('run-vcpkg: cache miss scenario test', async () => {
     // Asserts.
     expect(restoreCacheSpy).toBeCalledTimes(1);
     const key = restoreCacheSpy.mock.calls[0][1];
+    // Cache.save is never called by run-vcpkg action.
+    expect(saveCacheSpy).toBeCalledTimes(0);
     // Cache was missed, it must be called once!
-    expect(saveCacheSpy).toBeCalledTimes(1);
     expect(vcpkgRunnerRunSpy).toBeCalledTimes(1);
     expect(saveCacheSpy.mock.calls[0][1]).toBe(key);
 });
 
-test('run-vcpkg: cache must not be restored/saved when "doNotCache" is true scenario test', async () => {
+test('run-vcpkg: cache must not be restored/saved when "doNotCache" is true', async () => {
     // Arrange.
     const saveCacheSpy = jest.spyOn(cache, "saveCache");
     const restoreCacheSpy = jest.spyOn(cache, "restoreCache");

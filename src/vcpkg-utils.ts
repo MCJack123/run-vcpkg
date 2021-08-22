@@ -10,7 +10,6 @@ import * as baselib from '@lukka/base-lib'
 import * as baseutillib from '@lukka/base-util-lib'
 import * as actionlib from '@lukka/action-lib'
 import * as cache from '@actions/cache'
-import { additionalCachedPathsInput } from './vcpkg-action'
 
 export class Utils {
 
@@ -20,7 +19,7 @@ export class Utils {
     try {
       fs.mkdirSync(path, { recursive: true });
     } catch (err) {
-      if (err.code !== 'EEXIST') {
+      if ((err as any).code !== 'EEXIST') {
         core.warning(`Failed to create directory '${path}', error='${err}'.`);
       }
     }
@@ -91,43 +90,45 @@ export class Utils {
     return [id, isSubmodule];
   }
 
-  public static async computeCacheKey(appendedCacheKey: string): Promise<string> {
+  public static async computeCacheKey(appendedCacheKey: string): Promise<string[]> {
     let key = "";
-    const inputVcpkgPath = core.getInput(runvcpkglib.vcpkgDirectory);
+    const restoreKeys = [] as string[];
 
     const actionLib = new actionlib.ActionLib();
     const baseUtil = new baseutillib.BaseUtilLib(actionLib);
 
+    key += "runnerOS=" + process.env.ImageOS ? process.env.ImageOS : process.platform;
+    restoreKeys.push(key);
+
+    const inputVcpkgPath = core.getInput(runvcpkglib.vcpkgDirectory);
     const [commitId, isSubmodule] = await Utils.getVcpkgCommitId(baseUtil, inputVcpkgPath);
     const userProvidedCommitId = core.getInput(runvcpkglib.vcpkgCommitId);
     if (commitId) {
       core.info(`vcpkg identified at commitId='${commitId}', adding it to the cache's key.`);
       if (isSubmodule) {
-        key += `submodGitId=${commitId}`;
+        key += `_vcpkgGitCommit=${commitId}`;
+        core.info(`Adding vcpkg submodule commit id '${commitId}' to cache key`);
       } else {
-        key += "localGitId=" + Utils.hashCode(userProvidedCommitId);
+        key += `_vcpkgGitCommit=${userProvidedCommitId}`;
+        core.info(`Adding user provided vcpkg commit id ${userProvidedCommitId} to cache key`);
       }
     } else if (userProvidedCommitId) {
       core.info(`Using user provided vcpkg's Git commit id='${userProvidedCommitId}', adding it to the cache's key.`);
-      key += "localGitId=" + Utils.hashCode(userProvidedCommitId);
+      key += `_vcpkgGitCommit=${userProvidedCommitId}`;
+      core.info(`Adding user provided vcpkg commit id ${userProvidedCommitId} to cache key`);
+      restoreKeys.push(key);
     } else {
       core.info(`No vcpkg's commit id was provided, does not contribute to the cache's key.`);
     }
+    restoreKeys.push(key)
 
-    key += "-args=" + Utils.hashCode(core.getInput(runvcpkglib.vcpkgArguments));
-    key += "-os=" + Utils.hashCode(process.env.ImageOS ? process.env.ImageOS : process.platform);
-
-    if (process.env.ImageVersion) {
-      key += "-imageVer=" + Utils.hashCode(process.env.ImageVersion);
+    if (appendedCacheKey) {
+      key += "-appendedKey=" + Utils.hashCode(appendedCacheKey);
+      restoreKeys.push(key);
     }
 
-    key += "-appendedKey=" + Utils.hashCode(appendedCacheKey);
-
-    // Add the triplet only if it is provided.
-    const triplet = core.getInput(runvcpkglib.vcpkgTriplet)
-    if (triplet)
-      key += "-triplet=" + Utils.hashCode(triplet);
-    return key;
+    restoreKeys.reverse();
+    return restoreKeys;
   }
 
   public static async saveCache(doNotCache: boolean, vcpkgCacheComputedKey: string, hitCacheKey: string | undefined, cachedPaths: string[]): Promise<void> {
@@ -151,12 +152,14 @@ export class Utils {
             await cache.saveCache(pathsToCache, vcpkgCacheComputedKey);
           }
           catch (error) {
-            if (error.name === cache.ValidationError.name) {
-              throw error;
-            } else if (error.name === cache.ReserveCacheError.name) {
-              core.info(error.message);
-            } else {
-              core.warning(error.message);
+            if (error instanceof Error) {
+              if (error.name === cache.ValidationError.name) {
+                throw error;
+              } else if (error.name === cache.ReserveCacheError.name) {
+                core.info(error.message);
+              } else {
+                core.warning(error.message);
+              }
             }
           }
         }

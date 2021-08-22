@@ -6,10 +6,6 @@ name: 'run-vcpkg'
 description: 'Run vcpkg to build C/C++ dependencies and cache them automatically.'
 author: 'Luca Cappa https://github.com/lukka'
 inputs:
-  setupOnly:
-    default: false
-    required: false
-    description: "Indicates whether to only setup vcpkg (i.e. installing it and setting the environment variables VCPKG_ROOT, RUNVCPK_VCPKG_ROOT), without installing any port."
   additionalCachedPaths:
     required: false
     description: "Specify a semi-colon separated list of additional paths to be cached."
@@ -19,30 +15,14 @@ inputs:
   vcpkgGitCommitId:
     required: false
     description: "Specify the full SHA-1 hash of a Git commit (not a branch name, nor a tag!) that establishes which version of vcpkg needs to be used. When using vcpkg as a Git submodule, this input is *not* needed as implicitly specified by the submodule."
-  vcpkgArguments:
-    default: ""
-    required: false
-    descriptions: "Provides the arguments appended to 'vcpkg install'. It is recommended to use a response file to provide either the triplet and the list of packages to be installed. , e.g. `@<github.workspace>/vcpkg_osx.txt`. Note the 'at' character prepended to the path denotes a response file."
   vcpkgDirectory:
     default: ${{ github.workspace }}/vcpkg
     required: false
     descriptions: "Specify the vcpkg's root directory. If not specified, it defaults to  <github.workspace>/vcpkg. When vcpkg is a Git submodule, specify the full path to it."
-  vcpkgArtifactIgnoreEntries:
-    default: "!.git\n**/*\n!installed\n!/vcpkg\n!vcpkg.exe\n!vcpkgArtifactIgnoreEntries\n"
-    required: false
-    description: "Specify entries to append to the .artifactignore file. This file specifies which directory to ignore or to include by the Cache task. For more info: https://docs.microsoft.com/en-us/azure/devops/artifacts/reference/artifactignore?view=azure-devops . The file is created if not already existing."
   vcpkgGitURL:
     default: "https://github.com/microsoft/vcpkg.git"
     required: false
     description: "Specify the URL Git repository to download vcpkg from. Defaults to https://github.com/microsoft/vcpkg.git"
-  vcpkgTriplet:
-    default: ""
-    required: false
-    description: "Specify the vcpkg triplet. Common values are x64-windows, x64-linux and x64-osx. It is recommended to specify the triplet in the response file provided in the arguments instead than here."
-  cleanAfterBuild:
-    default: true
-    required: false
-    description: "Append the argument '--clean-after-build' to vcpkgArgument input, to clean buildtrees, packages and downloads after building each port. Default is true."
   doNotUpdateVcpkg: 
     default: false
     required: false

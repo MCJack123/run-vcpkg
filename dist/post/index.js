@@ -33,9 +33,8 @@ function main() {
         const baseUtil = new baseUtilLib.BaseUtilLib(actionLib);
         try {
             yield baseUtil.wrapOp('Save vcpkg and its artifacts to cache', () => __awaiter(this, void 0, void 0, function* () {
-                // Caching in the post action happens only when in 'setupOnly:true' mode.
                 if (core.getState(vcpkgaction.VCPKG_DO_CACHE_ON_POST_ACTION_KEY) !== "true") {
-                    core.info("Skipping saving cache since the input 'setupOnly' is not set to true.");
+                    core.info("Skipping saving cache.");
                     return;
                 }
                 else {
@@ -109,7 +108,6 @@ class VcpkgAction {
     constructor(baseUtilLib) {
         this.baseUtilLib = baseUtilLib;
         this.doNotCache = false;
-        this.isSetupOnly = false;
         this.doNotCache = core.getInput(exports.doNotCacheInput).toLowerCase() === "true";
         core.saveState(exports.VCPKG_DO_NOT_CACHE_KEY, this.doNotCache ? "true" : "false");
         this.appendedCacheKey = core.getInput(exports.appendedCacheKeyInput);
@@ -117,27 +115,20 @@ class VcpkgAction {
         vcpkgutil.Utils.ensureDirExists(this.vcpkgRootDir);
         core.saveState(exports.VCPKG_ROOT_KEY, this.vcpkgRootDir);
         vcpkgutil.Utils.addCachedPaths(core.getInput(exports.additionalCachedPathsInput));
-        this.isSetupOnly = core.getInput(runvcpkglib.setupOnly).toLowerCase() !== "true";
     }
     run() {
         return __awaiter(this, void 0, void 0, function* () {
-            const vcpkgCacheComputedKey = yield vcpkgutil.Utils.computeCacheKey(this.appendedCacheKey);
+            const restoreKeys = yield vcpkgutil.Utils.computeCacheKey(this.appendedCacheKey);
+            const vcpkgCacheComputedKey = restoreKeys[0];
             if (!vcpkgCacheComputedKey) {
                 core.error("Computation for the cache key failed!");
             }
             else {
                 core.saveState(exports.VCPKG_CACHE_COMPUTED_KEY, vcpkgCacheComputedKey);
-                core.info(`Cache's key = '${vcpkgCacheComputedKey}'.`);
-                yield this.baseUtilLib.wrapOp('Restore vcpkg and its artifacts from cache', () => this.restoreCache(vcpkgCacheComputedKey));
+                yield this.baseUtilLib.wrapOp('Restore vcpkg and its artifacts from cache', () => this.restoreCache(restoreKeys));
                 const runner = new runvcpkglib.VcpkgRunner(this.baseUtilLib.baseLib);
                 yield runner.run();
-                if (this.isSetupOnly) {
-                    yield this.baseUtilLib.wrapOp('Cache vcpkg and its artifacts', () => this.saveCache(vcpkgCacheComputedKey));
-                }
-                else {
-                    // If 'setupOnly' is true, trigger the saving of the cache during the post-action execution.
-                    core.saveState(exports.VCPKG_DO_CACHE_ON_POST_ACTION_KEY, "true");
-                }
+                core.saveState(exports.VCPKG_DO_CACHE_ON_POST_ACTION_KEY, "true");
             }
         });
     }
@@ -146,7 +137,7 @@ class VcpkgAction {
             yield vcpkgutil.Utils.saveCache(this.doNotCache, key, this.hitCacheKey, vcpkgutil.Utils.getAllCachedPaths(this.baseUtilLib.baseLib, this.vcpkgRootDir));
         });
     }
-    restoreCache(key) {
+    restoreCache(restoreKeys) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 if (this.doNotCache) {
@@ -154,16 +145,18 @@ class VcpkgAction {
                 }
                 else {
                     const pathsToCache = vcpkgutil.Utils.getAllCachedPaths(this.baseUtilLib.baseLib, this.vcpkgRootDir);
-                    core.info(`Cache's key = '${key}', paths = '${pathsToCache}'`);
-                    core.info(`Running restore-cache...`);
+                    const primaryKey = restoreKeys.shift();
+                    core.info(`Cache key: '${primaryKey}'`);
+                    core.info(`Cache restore keys: '${restoreKeys}'`);
+                    core.info(`Cached paths: '${pathsToCache}'`);
                     let cacheHitId;
                     try {
-                        cacheHitId = yield cache.restoreCache(pathsToCache, key);
+                        cacheHitId = yield cache.restoreCache(pathsToCache, primaryKey, restoreKeys);
                     }
                     catch (err) {
                         try {
                             core.warning(`restoreCache() failed once: '${err === null || err === void 0 ? void 0 : err.toString()}' , retrying...`);
-                            cacheHitId = yield cache.restoreCache(pathsToCache, key);
+                            cacheHitId = yield cache.restoreCache(pathsToCache, primaryKey, restoreKeys);
                         }
                         catch (err) {
                             core.warning(`restoreCache() failed again: '${err === null || err === void 0 ? void 0 : err.toString()}'.`);
@@ -299,38 +292,41 @@ class Utils {
     static computeCacheKey(appendedCacheKey) {
         return __awaiter(this, void 0, void 0, function* () {
             let key = "";
-            const inputVcpkgPath = core.getInput(runvcpkglib.vcpkgDirectory);
+            const restoreKeys = [];
             const actionLib = new actionlib.ActionLib();
             const baseUtil = new baseutillib.BaseUtilLib(actionLib);
+            key += "runnerOS=" + process.env.ImageOS ? process.env.ImageOS : 0;
+            restoreKeys.push(key);
+            const inputVcpkgPath = core.getInput(runvcpkglib.vcpkgDirectory);
             const [commitId, isSubmodule] = yield Utils.getVcpkgCommitId(baseUtil, inputVcpkgPath);
             const userProvidedCommitId = core.getInput(runvcpkglib.vcpkgCommitId);
             if (commitId) {
                 core.info(`vcpkg identified at commitId='${commitId}', adding it to the cache's key.`);
                 if (isSubmodule) {
-                    key += `submodGitId=${commitId}`;
+                    key += `_vcpkgGitCommit=${commitId}`;
+                    core.info(`Adding vcpkg submodule commit id '${commitId}' to cache key`);
                 }
                 else {
-                    key += "localGitId=" + Utils.hashCode(userProvidedCommitId);
+                    key += `_vcpkgGitCommit=${userProvidedCommitId}`;
+                    core.info(`Adding user provided vcpkg commit id ${userProvidedCommitId} to cache key`);
                 }
             }
             else if (userProvidedCommitId) {
                 core.info(`Using user provided vcpkg's Git commit id='${userProvidedCommitId}', adding it to the cache's key.`);
-                key += "localGitId=" + Utils.hashCode(userProvidedCommitId);
+                key += `_vcpkgGitCommit=${userProvidedCommitId}`;
+                core.info(`Adding user provided vcpkg commit id ${userProvidedCommitId} to cache key`);
+                restoreKeys.push(key);
             }
             else {
                 core.info(`No vcpkg's commit id was provided, does not contribute to the cache's key.`);
             }
-            key += "-args=" + Utils.hashCode(core.getInput(runvcpkglib.vcpkgArguments));
-            key += "-os=" + Utils.hashCode(process.env.ImageOS ? process.env.ImageOS : process.platform);
-            if (process.env.ImageVersion) {
-                key += "-imageVer=" + Utils.hashCode(process.env.ImageVersion);
+            restoreKeys.push(key);
+            if (appendedCacheKey) {
+                key += "-appendedKey=" + Utils.hashCode(appendedCacheKey);
+                restoreKeys.push(key);
             }
-            key += "-appendedKey=" + Utils.hashCode(appendedCacheKey);
-            // Add the triplet only if it is provided.
-            const triplet = core.getInput(runvcpkglib.vcpkgTriplet);
-            if (triplet)
-                key += "-triplet=" + Utils.hashCode(triplet);
-            return key;
+            restoreKeys.reverse();
+            return restoreKeys;
         });
     }
     static saveCache(doNotCache, vcpkgCacheComputedKey, hitCacheKey, cachedPaths) {
@@ -355,14 +351,16 @@ class Utils {
                             yield cache.saveCache(pathsToCache, vcpkgCacheComputedKey);
                         }
                         catch (error) {
-                            if (error.name === cache.ValidationError.name) {
-                                throw error;
-                            }
-                            else if (error.name === cache.ReserveCacheError.name) {
-                                core.info(error.message);
-                            }
-                            else {
-                                core.warning(error.message);
+                            if (error instanceof Error) {
+                                if (error.name === cache.ValidationError.name) {
+                                    throw error;
+                                }
+                                else if (error.name === cache.ReserveCacheError.name) {
+                                    core.info(error.message);
+                                }
+                                else {
+                                    core.warning(error.message);
+                                }
                             }
                         }
                     }
@@ -4360,7 +4358,7 @@ var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (
 var __importStar = (this && this.__importStar) || function (mod) {
     if (mod && mod.__esModule) return mod;
     var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
     __setModuleDefault(result, mod);
     return result;
 };
@@ -4622,7 +4620,6 @@ class ActionToolRunner {
         }
         return args;
     }
-    ;
 }
 exports.ActionToolRunner = ActionToolRunner;
 class ActionLib {
@@ -4806,7 +4803,7 @@ var __createBinding = (this && this.__createBinding) || (Object.create ? (functi
     o[k2] = m[k];
 }));
 var __exportStar = (this && this.__exportStar) || function(m, exports) {
-    for (var p in m) if (p !== "default" && !exports.hasOwnProperty(p)) __createBinding(exports, m, p);
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 __exportStar(__webpack_require__(7447), exports);
@@ -4827,7 +4824,7 @@ var __createBinding = (this && this.__createBinding) || (Object.create ? (functi
     o[k2] = m[k];
 }));
 var __exportStar = (this && this.__exportStar) || function(m, exports) {
-    for (var p in m) if (p !== "default" && !exports.hasOwnProperty(p)) __createBinding(exports, m, p);
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 __exportStar(__webpack_require__(9951), exports);
@@ -4858,7 +4855,7 @@ var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (
 var __importStar = (this && this.__importStar) || function (mod) {
     if (mod && mod.__esModule) return mod;
     var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
     __setModuleDefault(result, mod);
     return result;
 };
@@ -4975,11 +4972,11 @@ class BaseUtilLib {
         try {
             const readString = fs.readFileSync(path, { encoding: 'utf8', flag: 'r' });
             this.baseLib.debug(`readFile(${path})='${readString}'.`);
-            return [true, readString];
+            return readString;
         }
         catch (error) {
             this.baseLib.debug(`readFile(${path}): ${"" + error}`);
-            return [false, error];
+            return null;
         }
     }
     writeFile(file, content) {
@@ -5102,20 +5099,6 @@ class BaseUtilLib {
         }
         return result;
     }
-    /**
-     * Check whether the current generator selected in the command line
-     * is -G Ninja or -G Ninja Multi-Config.
-     * @export
-     * @param {string} commandLineString The command line as string
-     * @returns {boolean}
-     */
-    isNinjaGenerator(args) {
-        for (const arg of args) {
-            if (/-G[\s]*(?:\"Ninja.*\"|Ninja.*)/.test(arg))
-                return true;
-        }
-        return false;
-    }
     isMakeProgram(args) {
         for (const arg of args) {
             if (/-DCMAKE_MAKE_PROGRAM/.test(arg))
@@ -5141,7 +5124,7 @@ class BaseUtilLib {
                 }
             }
         }
-        return undefined;
+        return null;
     }
     removeToolchainFile(args) {
         return args.filter(a => !/-DCMAKE_TOOLCHAIN_FILE(:[A-Za-z]+)?=[^\s]+/.test(a));
@@ -5232,12 +5215,12 @@ class BaseUtilLib {
      * Get a set of commands to be run in the shell of the host OS.
      * @export
      * @param {string[]} args
-     * @returns {(trm.ToolRunner | undefined)}
+     * @returns {(trm.ToolRunner | null)}
      */
     getScriptCommand(args) {
         var _a;
         return __awaiter(this, void 0, void 0, function* () {
-            let tool;
+            let tool = null;
             if (this.isWin32()) {
                 const cmdExe = (_a = process.env.COMSPEC) !== null && _a !== void 0 ? _a : "cmd.exe";
                 const cmdPath = yield this.baseLib.which(cmdExe, true);
@@ -5250,8 +5233,8 @@ class BaseUtilLib {
                 tool = this.baseLib.tool(shPath);
                 tool.arg('-c');
                 tool.arg(args);
-                return tool;
             }
+            return tool;
         });
     }
     isVariableStrippingPath(variableName) {
@@ -5292,12 +5275,15 @@ class BaseUtilLib {
         if (obj === undefined)
             throw new Error(`Agument '${name}' is undefined`);
     }
+    static throwIfNull(obj, name) {
+        if (obj === null)
+            throw new Error(`Agument '${name}' is null`);
+    }
     static isValidSHA1(text) {
         return /^[a-fA-F0-9]{40}$/.test(text);
     }
 }
 exports.BaseUtilLib = BaseUtilLib;
-BaseUtilLib.cachingFormatEnvName = 'AZP_CACHING_CONTENT_FORMAT';
 class Matcher {
     constructor(name, baseLib, fromPath) {
         this.name = name;
@@ -5346,8 +5332,8 @@ class LogFileCollector {
     }
     handleOutput(buffer) {
         this.appendBuffer(buffer);
-        this.baseLib.debug(`\n\nappending: ${buffer}\n\n`);
-        this.baseLib.debug(`\n\nbuffer: ${this.bufferString}\n\n`);
+        //?? this.baseLib.debug(`\n\nappending: ${buffer}\n\n`);
+        //?? this.baseLib.debug(`\n\nbuffer: ${this.bufferString}\n\n`);
         let consumedUntil = -1;
         for (const re of this.regExps) {
             re.lastIndex = 0;
@@ -5367,7 +5353,7 @@ class LogFileCollector {
             }
         }
         this.limitBuffer(consumedUntil);
-        this.baseLib.debug(`\n\nremaining: ${this.bufferString}\n\n`);
+        //?? this.baseLib.debug(`\n\nremaining: ${this.bufferString}\n\n`);
     }
 }
 exports.LogFileCollector = LogFileCollector;
@@ -5407,7 +5393,7 @@ var __createBinding = (this && this.__createBinding) || (Object.create ? (functi
     o[k2] = m[k];
 }));
 var __exportStar = (this && this.__exportStar) || function(m, exports) {
-    for (var p in m) if (p !== "default" && !exports.hasOwnProperty(p)) __createBinding(exports, m, p);
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 __exportStar(__webpack_require__(4408), exports);
@@ -5440,7 +5426,7 @@ var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (
 var __importStar = (this && this.__importStar) || function (mod) {
     if (mod && mod.__esModule) return mod;
     var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
     __setModuleDefault(result, mod);
     return result;
 };
@@ -5470,21 +5456,14 @@ exports.getOrdinaryCachedPaths = getOrdinaryCachedPaths;
 // Released under the term specified in file LICENSE.txt
 // SPDX short identifier: MIT
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.logCollectionRegExps = exports.setupOnly = exports.vcpkgRoot = exports.doNotUpdateVcpkg = exports.cleanAfterBuild = exports.vcpkgLastBuiltCommitId = exports.vcpkgArtifactIgnoreEntries = exports.vcpkgDirectory = exports.vcpkgTriplet = exports.outVarVcpkgTriplet = exports.outVcpkgTriplet = exports.outVcpkgRootPath = exports.vcpkgCommitId = exports.vcpkgGitURL = exports.vcpkgArguments = void 0;
-exports.vcpkgArguments = 'vcpkgArguments';
+exports.logCollectionRegExps = exports.vcpkgRoot = exports.doNotUpdateVcpkg = exports.vcpkgLastBuiltCommitId = exports.vcpkgDirectory = exports.outVcpkgRootPath = exports.vcpkgCommitId = exports.vcpkgGitURL = void 0;
 exports.vcpkgGitURL = 'vcpkgGitURL';
 exports.vcpkgCommitId = 'vcpkgGitCommitId';
 exports.outVcpkgRootPath = "RUNVCPKG_VCPKG_ROOT";
-exports.outVcpkgTriplet = "RUNVCPKG_VCPKG_TRIPLET";
-exports.outVarVcpkgTriplet = "RUNVCPKG_VCPKG_TRIPLET_OUT";
-exports.vcpkgTriplet = "vcpkgTriplet";
 exports.vcpkgDirectory = "vcpkgDirectory";
-exports.vcpkgArtifactIgnoreEntries = "vcpkgArtifactIgnoreEntries";
 exports.vcpkgLastBuiltCommitId = 'vcpkgLastBuiltCommitId';
-exports.cleanAfterBuild = 'cleanAfterBuild';
 exports.doNotUpdateVcpkg = 'doNotUpdateVcpkg';
 exports.vcpkgRoot = 'VCPKG_ROOT';
-exports.setupOnly = 'setupOnly';
 exports.logCollectionRegExps = 'logCollectionRegExps';
 //# sourceMappingURL=vcpkg-globals.js.map
 
@@ -5513,7 +5492,7 @@ var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (
 var __importStar = (this && this.__importStar) || function (mod) {
     if (mod && mod.__esModule) return mod;
     var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
     __setModuleDefault(result, mod);
     return result;
 };
@@ -5533,28 +5512,21 @@ const globals = __importStar(__webpack_require__(4408));
 const baseutillib = __importStar(__webpack_require__(2365));
 class VcpkgRunner {
     constructor(tl) {
-        var _a, _b, _c, _d, _e;
+        var _a, _b;
         this.tl = tl;
         this.options = {};
-        this.vcpkgArtifactIgnoreEntries = [];
-        this.cleanAfterBuild = false;
         this.doNotUpdateVcpkg = false;
         this.baseUtils = new baseutillib.BaseUtilLib(tl);
-        this.setupOnly = (_a = this.tl.getBoolInput(globals.setupOnly, false)) !== null && _a !== void 0 ? _a : false;
-        this.vcpkgArgs = (_b = this.tl.getInput(globals.vcpkgArguments, this.setupOnly === false)) !== null && _b !== void 0 ? _b : "";
         this.defaultVcpkgUrl = 'https://github.com/microsoft/vcpkg.git';
         this.vcpkgURL =
             this.tl.getInput(globals.vcpkgGitURL, false) || this.defaultVcpkgUrl;
         this.vcpkgCommitId =
             this.tl.getInput(globals.vcpkgCommitId, false);
-        this.vcpkgDestPath = (_c = this.tl.getPathInput(globals.vcpkgDirectory, false, false)) !== null && _c !== void 0 ? _c : "";
+        this.vcpkgDestPath = (_a = this.tl.getPathInput(globals.vcpkgDirectory, false, false)) !== null && _a !== void 0 ? _a : "";
         if (!this.vcpkgDestPath) {
             this.vcpkgDestPath = path.join(this.tl.getBinDir(), 'vcpkg');
         }
-        this.vcpkgTriplet = this.tl.getInput(globals.vcpkgTriplet, false) || "";
-        this.vcpkgArtifactIgnoreEntries = this.tl.getDelimitedInput(globals.vcpkgArtifactIgnoreEntries, '\n', false);
-        this.doNotUpdateVcpkg = (_d = this.tl.getBoolInput(globals.doNotUpdateVcpkg, false)) !== null && _d !== void 0 ? _d : false;
-        this.cleanAfterBuild = (_e = this.tl.getBoolInput(globals.cleanAfterBuild, false)) !== null && _e !== void 0 ? _e : true;
+        this.doNotUpdateVcpkg = (_b = this.tl.getBoolInput(globals.doNotUpdateVcpkg, false)) !== null && _b !== void 0 ? _b : false;
         // Git update or clone depending on content of vcpkgDestPath input parameter.
         this.pathToLastBuiltCommitId = path.join(this.vcpkgDestPath, globals.vcpkgLastBuiltCommitId);
         const regs = this.tl.getDelimitedInput(globals.logCollectionRegExps, ';', false);
@@ -5605,10 +5577,6 @@ class VcpkgRunner {
             if (needRebuild) {
                 yield this.baseUtils.wrapOp("Build vcpkg", () => this.build());
             }
-            if (!this.setupOnly) {
-                yield this.baseUtils.wrapOp("Install/Update ports", () => this.updatePackages());
-            }
-            yield this.baseUtils.wrapOp("Prepare vcpkg generated file for caching", () => this.prepareForCache());
         });
     }
     setOutputs() {
@@ -5622,97 +5590,6 @@ class VcpkgRunner {
         const outVarName = `${globals.outVcpkgRootPath}_OUT`;
         this.tl.info(`Set the output variable '${outVarName}' to value: ${this.vcpkgDestPath}`);
         this.tl.setOutput(`${outVarName}`, this.vcpkgDestPath);
-        // Force AZP_CACHING_CONTENT_FORMAT to "Files"
-        this.baseUtils.setEnvVar(baseutillib.BaseUtilLib.cachingFormatEnvName, "Files");
-        // Set output env and var for the triplet.
-        this.setEnvOutTriplet(globals.outVcpkgTriplet, globals.outVarVcpkgTriplet, this.vcpkgTriplet);
-    }
-    prepareForCache() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const artifactignoreFile = '.artifactignore';
-            const artifactFullPath = path.join(this.vcpkgDestPath, artifactignoreFile);
-            this.baseUtils.writeFile(artifactFullPath, this.vcpkgArtifactIgnoreEntries.join('\n'));
-        });
-    }
-    extractOverlays(args, currentDir) {
-        const overlays = args.split(' ').
-            filter((item) => item.startsWith(VcpkgRunner.overlayArgName) || item.startsWith('@'));
-        let result = [];
-        for (const item of overlays) {
-            if (item.startsWith('@')) {
-                let responseFilePath = item.slice(1);
-                if (!path.isAbsolute(responseFilePath)) {
-                    responseFilePath = path.join(currentDir, responseFilePath);
-                }
-                const [ok, content] = this.baseUtils.readFile(responseFilePath);
-                if (ok) {
-                    const overlays2 = content.split('\n').
-                        filter((item) => item.trim().startsWith(VcpkgRunner.overlayArgName)).map((item) => item.trim());
-                    result = result.concat(overlays2);
-                }
-            }
-            else {
-                result = result.concat(item);
-            }
-        }
-        return result;
-    }
-    updatePackages() {
-        return __awaiter(this, void 0, void 0, function* () {
-            let vcpkgPath = path.join(this.vcpkgDestPath, 'vcpkg');
-            if (this.baseUtils.isWin32()) {
-                vcpkgPath += '.exe';
-            }
-            const appendedOverlaysArgs = this.extractOverlays(this.vcpkgArgs, this.options.cwd);
-            const appendedString = appendedOverlaysArgs ? " " + appendedOverlaysArgs.join(' ') : "";
-            // vcpkg remove --outdated --recurse
-            const removeCmd = `remove --outdated --recurse${appendedString}`;
-            let vcpkgTool = this.tl.tool(vcpkgPath);
-            this.tl.info(`Running 'vcpkg ${removeCmd}' in directory '${this.vcpkgDestPath}' ...`);
-            vcpkgTool.line(removeCmd);
-            this.baseUtils.throwIfErrorCode(yield vcpkgTool.exec(this.options));
-            // vcpkg install --recurse <list of packages>
-            vcpkgTool = this.tl.tool(vcpkgPath);
-            let installCmd = `install --recurse ${this.vcpkgArgs}`;
-            // Get the triplet specified in the task.
-            let vcpkgTripletUsed = this.vcpkgTriplet;
-            // Extract triplet from arguments for vcpkg.
-            const extractedTriplet = baseutillib.BaseUtilLib.extractTriplet(installCmd, (p) => this.baseUtils.readFile(p));
-            // Append triplet, only if provided by the user in the task arguments
-            if (extractedTriplet !== null) {
-                if (vcpkgTripletUsed) {
-                    this.tl.warning(`Ignoring the task provided triplet: '${vcpkgTripletUsed}'.`);
-                }
-                vcpkgTripletUsed = extractedTriplet;
-                this.tl.info(`Extracted triplet from command line '${vcpkgTripletUsed}'.`);
-            }
-            else {
-                // If triplet is nor specified in arguments, nor in task, let's deduce it from
-                // agent context (i.e. its OS).
-                if (!vcpkgTripletUsed) {
-                    this.tl.info("No '--triplet' argument is provided on the command line to vcpkg.");
-                }
-                else {
-                    this.tl.info(`Using triplet '${vcpkgTripletUsed}'.`);
-                    // Add the triplet argument to the command line.
-                    installCmd += ` --triplet ${vcpkgTripletUsed}`;
-                }
-            }
-            // If required, add '--clean-after-build'
-            if (this.cleanAfterBuild) {
-                installCmd += ' --clean-after-build';
-            }
-            if (vcpkgTripletUsed) {
-                // Set the used triplet in RUNVCPKG_VCPKG_TRIPLET environment/output variables.
-                this.setEnvOutTriplet(globals.outVcpkgTriplet, globals.outVarVcpkgTriplet, vcpkgTripletUsed);
-            }
-            else {
-                this.tl.info(`${globals.outVcpkgTriplet}' nor '${globals.outVarVcpkgTriplet}' have NOT been set by the step since there is no default triplet specified.`);
-            }
-            vcpkgTool.line(installCmd);
-            this.tl.info(`Running 'vcpkg ${installCmd}' in directory '${this.vcpkgDestPath}' ...`);
-            this.baseUtils.throwIfErrorCode(yield vcpkgTool.exec(this.options));
-        });
     }
     /**
      *
@@ -5763,13 +5640,7 @@ class VcpkgRunner {
             const isSubmodule = yield this.baseUtils.isVcpkgSubmodule(gitPath, this.vcpkgDestPath);
             if (isSubmodule) {
                 // In case vcpkg it is a Git submodule...
-                this.tl.info(`'vcpkg' is detected as a submodule, adding '.git' to the ignored entries in '.artifactignore' file (for excluding it from caching).`);
-                // Remove any existing '!.git'.
-                this.vcpkgArtifactIgnoreEntries =
-                    this.vcpkgArtifactIgnoreEntries.filter(item => !item.trim().endsWith('!.git'));
-                // Add '.git' to ignore that directory.
-                this.vcpkgArtifactIgnoreEntries.push('.git');
-                this.tl.info(`File '.artifactsignore' content: '${this.vcpkgArtifactIgnoreEntries.map(s => `'${s}'`).join(', ')}'`);
+                this.tl.info(`'vcpkg' is detected as a submodule.`);
                 updated = true;
                 // Issue a warning if the vcpkgCommitId is specified.
                 if (this.vcpkgCommitId) {
@@ -5801,9 +5672,9 @@ class VcpkgRunner {
     checkLastBuildCommitId(vcpkgCommitId) {
         this.tl.info(`Checking last vcpkg build commit id in file '${this.pathToLastBuiltCommitId}' ...`);
         let rebuild = true; // Default is true.
-        const [ok, lastCommitIdLast] = this.baseUtils.readFile(this.pathToLastBuiltCommitId);
-        this.tl.debug(`last build check: ${ok}, ${lastCommitIdLast}`);
-        if (ok) {
+        const lastCommitIdLast = this.baseUtils.readFile(this.pathToLastBuiltCommitId);
+        this.tl.debug(`last build check: ${lastCommitIdLast}`);
+        if (lastCommitIdLast) {
             this.tl.debug(`lastcommitid = ${lastCommitIdLast}, currentcommitid = ${vcpkgCommitId}`);
             if (lastCommitIdLast === vcpkgCommitId) {
                 rebuild = false;
@@ -5902,7 +5773,6 @@ class VcpkgRunner {
     }
 }
 exports.VcpkgRunner = VcpkgRunner;
-VcpkgRunner.overlayArgName = "--overlay-ports=";
 //# sourceMappingURL=vcpkg-runner.js.map
 
 /***/ }),
@@ -10172,11 +10042,11 @@ const {promisify} = __webpack_require__(1669);
 const path = __webpack_require__(5622);
 const globby = __webpack_require__(3398);
 const isGlob = __webpack_require__(4466);
-const slash = __webpack_require__(7016);
+const slash = __webpack_require__(4111);
 const gracefulFs = __webpack_require__(7758);
 const isPathCwd = __webpack_require__(8885);
 const isPathInside = __webpack_require__(628);
-const rimraf = __webpack_require__(9918);
+const rimraf = __webpack_require__(4959);
 const pMap = __webpack_require__(1855);
 
 const rimrafP = promisify(rimraf);
@@ -10287,392 +10157,6 @@ module.exports.sync = (patterns, {force, dryRun, cwd = process.cwd(), ...options
 	removedFiles.sort((a, b) => a.localeCompare(b));
 
 	return removedFiles;
-};
-
-
-/***/ }),
-
-/***/ 9918:
-/***/ ((module, __unused_webpack_exports, __webpack_require__) => {
-
-const assert = __webpack_require__(2357)
-const path = __webpack_require__(5622)
-const fs = __webpack_require__(5747)
-let glob = undefined
-try {
-  glob = __webpack_require__(1957)
-} catch (_err) {
-  // treat glob as optional.
-}
-
-const defaultGlobOpts = {
-  nosort: true,
-  silent: true
-}
-
-// for EMFILE handling
-let timeout = 0
-
-const isWindows = (process.platform === "win32")
-
-const defaults = options => {
-  const methods = [
-    'unlink',
-    'chmod',
-    'stat',
-    'lstat',
-    'rmdir',
-    'readdir'
-  ]
-  methods.forEach(m => {
-    options[m] = options[m] || fs[m]
-    m = m + 'Sync'
-    options[m] = options[m] || fs[m]
-  })
-
-  options.maxBusyTries = options.maxBusyTries || 3
-  options.emfileWait = options.emfileWait || 1000
-  if (options.glob === false) {
-    options.disableGlob = true
-  }
-  if (options.disableGlob !== true && glob === undefined) {
-    throw Error('glob dependency not found, set `options.disableGlob = true` if intentional')
-  }
-  options.disableGlob = options.disableGlob || false
-  options.glob = options.glob || defaultGlobOpts
-}
-
-const rimraf = (p, options, cb) => {
-  if (typeof options === 'function') {
-    cb = options
-    options = {}
-  }
-
-  assert(p, 'rimraf: missing path')
-  assert.equal(typeof p, 'string', 'rimraf: path should be a string')
-  assert.equal(typeof cb, 'function', 'rimraf: callback function required')
-  assert(options, 'rimraf: invalid options argument provided')
-  assert.equal(typeof options, 'object', 'rimraf: options should be object')
-
-  defaults(options)
-
-  let busyTries = 0
-  let errState = null
-  let n = 0
-
-  const next = (er) => {
-    errState = errState || er
-    if (--n === 0)
-      cb(errState)
-  }
-
-  const afterGlob = (er, results) => {
-    if (er)
-      return cb(er)
-
-    n = results.length
-    if (n === 0)
-      return cb()
-
-    results.forEach(p => {
-      const CB = (er) => {
-        if (er) {
-          if ((er.code === "EBUSY" || er.code === "ENOTEMPTY" || er.code === "EPERM") &&
-              busyTries < options.maxBusyTries) {
-            busyTries ++
-            // try again, with the same exact callback as this one.
-            return setTimeout(() => rimraf_(p, options, CB), busyTries * 100)
-          }
-
-          // this one won't happen if graceful-fs is used.
-          if (er.code === "EMFILE" && timeout < options.emfileWait) {
-            return setTimeout(() => rimraf_(p, options, CB), timeout ++)
-          }
-
-          // already gone
-          if (er.code === "ENOENT") er = null
-        }
-
-        timeout = 0
-        next(er)
-      }
-      rimraf_(p, options, CB)
-    })
-  }
-
-  if (options.disableGlob || !glob.hasMagic(p))
-    return afterGlob(null, [p])
-
-  options.lstat(p, (er, stat) => {
-    if (!er)
-      return afterGlob(null, [p])
-
-    glob(p, options.glob, afterGlob)
-  })
-
-}
-
-// Two possible strategies.
-// 1. Assume it's a file.  unlink it, then do the dir stuff on EPERM or EISDIR
-// 2. Assume it's a directory.  readdir, then do the file stuff on ENOTDIR
-//
-// Both result in an extra syscall when you guess wrong.  However, there
-// are likely far more normal files in the world than directories.  This
-// is based on the assumption that a the average number of files per
-// directory is >= 1.
-//
-// If anyone ever complains about this, then I guess the strategy could
-// be made configurable somehow.  But until then, YAGNI.
-const rimraf_ = (p, options, cb) => {
-  assert(p)
-  assert(options)
-  assert(typeof cb === 'function')
-
-  // sunos lets the root user unlink directories, which is... weird.
-  // so we have to lstat here and make sure it's not a dir.
-  options.lstat(p, (er, st) => {
-    if (er && er.code === "ENOENT")
-      return cb(null)
-
-    // Windows can EPERM on stat.  Life is suffering.
-    if (er && er.code === "EPERM" && isWindows)
-      fixWinEPERM(p, options, er, cb)
-
-    if (st && st.isDirectory())
-      return rmdir(p, options, er, cb)
-
-    options.unlink(p, er => {
-      if (er) {
-        if (er.code === "ENOENT")
-          return cb(null)
-        if (er.code === "EPERM")
-          return (isWindows)
-            ? fixWinEPERM(p, options, er, cb)
-            : rmdir(p, options, er, cb)
-        if (er.code === "EISDIR")
-          return rmdir(p, options, er, cb)
-      }
-      return cb(er)
-    })
-  })
-}
-
-const fixWinEPERM = (p, options, er, cb) => {
-  assert(p)
-  assert(options)
-  assert(typeof cb === 'function')
-
-  options.chmod(p, 0o666, er2 => {
-    if (er2)
-      cb(er2.code === "ENOENT" ? null : er)
-    else
-      options.stat(p, (er3, stats) => {
-        if (er3)
-          cb(er3.code === "ENOENT" ? null : er)
-        else if (stats.isDirectory())
-          rmdir(p, options, er, cb)
-        else
-          options.unlink(p, cb)
-      })
-  })
-}
-
-const fixWinEPERMSync = (p, options, er) => {
-  assert(p)
-  assert(options)
-
-  try {
-    options.chmodSync(p, 0o666)
-  } catch (er2) {
-    if (er2.code === "ENOENT")
-      return
-    else
-      throw er
-  }
-
-  let stats
-  try {
-    stats = options.statSync(p)
-  } catch (er3) {
-    if (er3.code === "ENOENT")
-      return
-    else
-      throw er
-  }
-
-  if (stats.isDirectory())
-    rmdirSync(p, options, er)
-  else
-    options.unlinkSync(p)
-}
-
-const rmdir = (p, options, originalEr, cb) => {
-  assert(p)
-  assert(options)
-  assert(typeof cb === 'function')
-
-  // try to rmdir first, and only readdir on ENOTEMPTY or EEXIST (SunOS)
-  // if we guessed wrong, and it's not a directory, then
-  // raise the original error.
-  options.rmdir(p, er => {
-    if (er && (er.code === "ENOTEMPTY" || er.code === "EEXIST" || er.code === "EPERM"))
-      rmkids(p, options, cb)
-    else if (er && er.code === "ENOTDIR")
-      cb(originalEr)
-    else
-      cb(er)
-  })
-}
-
-const rmkids = (p, options, cb) => {
-  assert(p)
-  assert(options)
-  assert(typeof cb === 'function')
-
-  options.readdir(p, (er, files) => {
-    if (er)
-      return cb(er)
-    let n = files.length
-    if (n === 0)
-      return options.rmdir(p, cb)
-    let errState
-    files.forEach(f => {
-      rimraf(path.join(p, f), options, er => {
-        if (errState)
-          return
-        if (er)
-          return cb(errState = er)
-        if (--n === 0)
-          options.rmdir(p, cb)
-      })
-    })
-  })
-}
-
-// this looks simpler, and is strictly *faster*, but will
-// tie up the JavaScript thread and fail on excessively
-// deep directory trees.
-const rimrafSync = (p, options) => {
-  options = options || {}
-  defaults(options)
-
-  assert(p, 'rimraf: missing path')
-  assert.equal(typeof p, 'string', 'rimraf: path should be a string')
-  assert(options, 'rimraf: missing options')
-  assert.equal(typeof options, 'object', 'rimraf: options should be object')
-
-  let results
-
-  if (options.disableGlob || !glob.hasMagic(p)) {
-    results = [p]
-  } else {
-    try {
-      options.lstatSync(p)
-      results = [p]
-    } catch (er) {
-      results = glob.sync(p, options.glob)
-    }
-  }
-
-  if (!results.length)
-    return
-
-  for (let i = 0; i < results.length; i++) {
-    const p = results[i]
-
-    let st
-    try {
-      st = options.lstatSync(p)
-    } catch (er) {
-      if (er.code === "ENOENT")
-        return
-
-      // Windows can EPERM on stat.  Life is suffering.
-      if (er.code === "EPERM" && isWindows)
-        fixWinEPERMSync(p, options, er)
-    }
-
-    try {
-      // sunos lets the root user unlink directories, which is... weird.
-      if (st && st.isDirectory())
-        rmdirSync(p, options, null)
-      else
-        options.unlinkSync(p)
-    } catch (er) {
-      if (er.code === "ENOENT")
-        return
-      if (er.code === "EPERM")
-        return isWindows ? fixWinEPERMSync(p, options, er) : rmdirSync(p, options, er)
-      if (er.code !== "EISDIR")
-        throw er
-
-      rmdirSync(p, options, er)
-    }
-  }
-}
-
-const rmdirSync = (p, options, originalEr) => {
-  assert(p)
-  assert(options)
-
-  try {
-    options.rmdirSync(p)
-  } catch (er) {
-    if (er.code === "ENOENT")
-      return
-    if (er.code === "ENOTDIR")
-      throw originalEr
-    if (er.code === "ENOTEMPTY" || er.code === "EEXIST" || er.code === "EPERM")
-      rmkidsSync(p, options)
-  }
-}
-
-const rmkidsSync = (p, options) => {
-  assert(p)
-  assert(options)
-  options.readdirSync(p).forEach(f => rimrafSync(path.join(p, f), options))
-
-  // We only end up here once we got ENOTEMPTY at least once, and
-  // at this point, we are guaranteed to have removed all the kids.
-  // So, we know that it won't be ENOENT or ENOTDIR or anything else.
-  // try really hard to delete stuff on windows, because it has a
-  // PROFOUNDLY annoying habit of not closing handles promptly when
-  // files are deleted, resulting in spurious ENOTEMPTY errors.
-  const retries = isWindows ? 100 : 1
-  let i = 0
-  do {
-    let threw = true
-    try {
-      const ret = options.rmdirSync(p, options)
-      threw = false
-      return ret
-    } finally {
-      if (++i < retries && threw)
-        continue
-    }
-  } while (true)
-}
-
-module.exports = rimraf
-rimraf.sync = rimrafSync
-
-
-/***/ }),
-
-/***/ 7016:
-/***/ ((module) => {
-
-"use strict";
-
-module.exports = path => {
-	const isExtendedLengthPath = /^\\\\\?\\/.test(path);
-	const hasNonAscii = /[^\u0000-\u0080]+/.test(path); // eslint-disable-line no-control-regex
-
-	if (isExtendedLengthPath || hasNonAscii) {
-		return path;
-	}
-
-	return path.replace(/\\/g, '/');
 };
 
 
@@ -15045,7 +14529,7 @@ var isWin32 = __webpack_require__(2087).platform() === 'win32';
 
 var slash = '/';
 var backslash = /\\/g;
-var enclosure = /[\{\[].*[\/]*.*[\}\]]$/;
+var enclosure = /[\{\[].*[\}\]]$/;
 var globby = /(^|[^\\])([\{\[]|\([^\)]+$)/;
 var escaped = /\\([\!\*\?\|\[\]\(\)\{\}])/g;
 
@@ -15053,6 +14537,7 @@ var escaped = /\\([\!\*\?\|\[\]\(\)\{\}])/g;
  * @param {string} str
  * @param {Object} opts
  * @param {boolean} [opts.flipBackslashes=true]
+ * @returns {string}
  */
 module.exports = function globParent(str, opts) {
   var options = Object.assign({ flipBackslashes: true }, opts);
@@ -16629,7 +16114,7 @@ const fs = __webpack_require__(5747);
 const path = __webpack_require__(5622);
 const fastGlob = __webpack_require__(3664);
 const gitIgnore = __webpack_require__(4777);
-const slash = __webpack_require__(2158);
+const slash = __webpack_require__(4111);
 
 const DEFAULT_IGNORE = [
 	'**/node_modules/**',
@@ -16926,25 +16411,6 @@ module.exports.hasMagic = (patterns, options) => []
 	.some(pattern => glob.hasMagic(pattern, options));
 
 module.exports.gitignore = gitignore;
-
-
-/***/ }),
-
-/***/ 2158:
-/***/ ((module) => {
-
-"use strict";
-
-module.exports = path => {
-	const isExtendedLengthPath = /^\\\\\?\\/.test(path);
-	const hasNonAscii = /[^\u0000-\u0080]+/.test(path); // eslint-disable-line no-control-regex
-
-	if (isExtendedLengthPath || hasNonAscii) {
-		return path;
-	}
-
-	return path.replace(/\\/g, '/');
-};
 
 
 /***/ }),
@@ -20486,7 +19952,7 @@ const parse = (input, options) => {
     START_ANCHOR
   } = PLATFORM_CHARS;
 
-  const globstar = (opts) => {
+  const globstar = opts => {
     return `(${capture}(?:(?!${START_ANCHOR}${opts.dot ? DOTS_SLASH : DOT_LITERAL}).)*?)`;
   };
 
@@ -20536,12 +20002,13 @@ const parse = (input, options) => {
 
   const eos = () => state.index === len - 1;
   const peek = state.peek = (n = 1) => input[state.index + n];
-  const advance = state.advance = () => input[++state.index];
+  const advance = state.advance = () => input[++state.index] || '';
   const remaining = () => input.slice(state.index + 1);
   const consume = (value = '', num = 0) => {
     state.consumed += value;
     state.index += num;
   };
+
   const append = token => {
     state.output += token.output != null ? token.output : token.value;
     consume(token.value);
@@ -20597,7 +20064,7 @@ const parse = (input, options) => {
       }
     }
 
-    if (extglobs.length && tok.type !== 'paren' && !EXTGLOB_CHARS[tok.value]) {
+    if (extglobs.length && tok.type !== 'paren') {
       extglobs[extglobs.length - 1].inner += tok.value;
     }
 
@@ -20629,6 +20096,7 @@ const parse = (input, options) => {
 
   const extglobClose = token => {
     let output = token.close + (opts.capture ? ')' : '');
+    let rest;
 
     if (token.type === 'negate') {
       let extglobStar = star;
@@ -20641,7 +20109,11 @@ const parse = (input, options) => {
         output = token.close = `)$))${extglobStar}`;
       }
 
-      if (token.prev.type === 'bos' && eos()) {
+      if (token.inner.includes('*') && (rest = remaining()) && /^\.[^\\/.]+$/.test(rest)) {
+        output = token.close = `)${rest})${extglobStar})`;
+      }
+
+      if (token.prev.type === 'bos') {
         state.negatedExtglob = true;
       }
     }
@@ -20750,9 +20222,9 @@ const parse = (input, options) => {
       }
 
       if (opts.unescape === true) {
-        value = advance() || '';
+        value = advance();
       } else {
-        value += advance() || '';
+        value += advance();
       }
 
       if (state.brackets === 0) {
@@ -21416,7 +20888,7 @@ parse.fastpaths = (input, options) => {
     star = `(${star})`;
   }
 
-  const globstar = (opts) => {
+  const globstar = opts => {
     if (opts.noglobstar === true) return star;
     return `(${capture}(?:(?!${START_ANCHOR}${opts.dot ? DOTS_SLASH : DOT_LITERAL}).)*?)`;
   };
@@ -21711,6 +21183,40 @@ picomatch.parse = (pattern, options) => {
 picomatch.scan = (input, options) => scan(input, options);
 
 /**
+ * Compile a regular expression from the `state` object returned by the
+ * [parse()](#parse) method.
+ *
+ * @param {Object} `state`
+ * @param {Object} `options`
+ * @param {Boolean} `returnOutput` Intended for implementors, this argument allows you to return the raw output from the parser.
+ * @param {Boolean} `returnState` Adds the state to a `state` property on the returned regex. Useful for implementors and debugging.
+ * @return {RegExp}
+ * @api public
+ */
+
+picomatch.compileRe = (state, options, returnOutput = false, returnState = false) => {
+  if (returnOutput === true) {
+    return state.output;
+  }
+
+  const opts = options || {};
+  const prepend = opts.contains ? '' : '^';
+  const append = opts.contains ? '' : '$';
+
+  let source = `${prepend}(?:${state.output})${append}`;
+  if (state && state.negated === true) {
+    source = `^(?!${source}).*$`;
+  }
+
+  const regex = picomatch.toRegex(source, options);
+  if (returnState === true) {
+    regex.state = state;
+  }
+
+  return regex;
+};
+
+/**
  * Create a regular expression from a parsed glob pattern.
  *
  * ```js
@@ -21723,56 +21229,25 @@ picomatch.scan = (input, options) => scan(input, options);
  * ```
  * @param {String} `state` The object returned from the `.parse` method.
  * @param {Object} `options`
+ * @param {Boolean} `returnOutput` Implementors may use this argument to return the compiled output, instead of a regular expression. This is not exposed on the options to prevent end-users from mutating the result.
+ * @param {Boolean} `returnState` Implementors may use this argument to return the state from the parsed glob with the returned regular expression.
  * @return {RegExp} Returns a regex created from the given pattern.
  * @api public
  */
 
-picomatch.compileRe = (parsed, options, returnOutput = false, returnState = false) => {
-  if (returnOutput === true) {
-    return parsed.output;
-  }
-
-  const opts = options || {};
-  const prepend = opts.contains ? '' : '^';
-  const append = opts.contains ? '' : '$';
-
-  let source = `${prepend}(?:${parsed.output})${append}`;
-  if (parsed && parsed.negated === true) {
-    source = `^(?!${source}).*$`;
-  }
-
-  const regex = picomatch.toRegex(source, options);
-  if (returnState === true) {
-    regex.state = parsed;
-  }
-
-  return regex;
-};
-
-picomatch.makeRe = (input, options, returnOutput = false, returnState = false) => {
+picomatch.makeRe = (input, options = {}, returnOutput = false, returnState = false) => {
   if (!input || typeof input !== 'string') {
     throw new TypeError('Expected a non-empty string');
   }
 
-  const opts = options || {};
   let parsed = { negated: false, fastpaths: true };
-  let prefix = '';
-  let output;
 
-  if (input.startsWith('./')) {
-    input = input.slice(2);
-    prefix = parsed.prefix = './';
+  if (options.fastpaths !== false && (input[0] === '.' || input[0] === '*')) {
+    parsed.output = parse.fastpaths(input, options);
   }
 
-  if (opts.fastpaths !== false && (input[0] === '.' || input[0] === '*')) {
-    output = parse.fastpaths(input, options);
-  }
-
-  if (output === undefined) {
+  if (!parsed.output) {
     parsed = parse(input, options);
-    parsed.prefix = prefix + (parsed.prefix || '');
-  } else {
-    parsed.output = output;
   }
 
   return picomatch.compileRe(parsed, options, returnOutput, returnState);
@@ -21859,7 +21334,8 @@ const depth = token => {
 /**
  * Quickly scans a glob pattern and returns an object with a handful of
  * useful properties, like `isGlob`, `path` (the leading non-glob, if it exists),
- * `glob` (the actual pattern), and `negated` (true if the path starts with `!`).
+ * `glob` (the actual pattern), `negated` (true if the path starts with `!` but not
+ * with `!(`) and `negatedExtglob` (true if the path starts with `!(`).
  *
  * ```js
  * const pm = require('picomatch');
@@ -21893,6 +21369,7 @@ const scan = (input, options) => {
   let braceEscaped = false;
   let backslashes = false;
   let negated = false;
+  let negatedExtglob = false;
   let finished = false;
   let braces = 0;
   let prev;
@@ -22004,6 +21481,9 @@ const scan = (input, options) => {
         isGlob = token.isGlob = true;
         isExtglob = token.isExtglob = true;
         finished = true;
+        if (code === CHAR_EXCLAMATION_MARK && index === start) {
+          negatedExtglob = true;
+        }
 
         if (scanToEnd === true) {
           while (eos() !== true && (code = advance())) {
@@ -22058,13 +21538,15 @@ const scan = (input, options) => {
           isBracket = token.isBracket = true;
           isGlob = token.isGlob = true;
           finished = true;
-
-          if (scanToEnd === true) {
-            continue;
-          }
           break;
         }
       }
+
+      if (scanToEnd === true) {
+        continue;
+      }
+
+      break;
     }
 
     if (opts.nonegate !== true && code === CHAR_EXCLAMATION_MARK && index === start) {
@@ -22155,7 +21637,8 @@ const scan = (input, options) => {
     isGlob,
     isExtglob,
     isGlobstar,
-    negated
+    negated,
+    negatedExtglob
   };
 
   if (opts.tokens === true) {
@@ -22321,6 +21804,373 @@ function reusify (Constructor) {
 }
 
 module.exports = reusify
+
+
+/***/ }),
+
+/***/ 4959:
+/***/ ((module, __unused_webpack_exports, __webpack_require__) => {
+
+const assert = __webpack_require__(2357)
+const path = __webpack_require__(5622)
+const fs = __webpack_require__(5747)
+let glob = undefined
+try {
+  glob = __webpack_require__(1957)
+} catch (_err) {
+  // treat glob as optional.
+}
+
+const defaultGlobOpts = {
+  nosort: true,
+  silent: true
+}
+
+// for EMFILE handling
+let timeout = 0
+
+const isWindows = (process.platform === "win32")
+
+const defaults = options => {
+  const methods = [
+    'unlink',
+    'chmod',
+    'stat',
+    'lstat',
+    'rmdir',
+    'readdir'
+  ]
+  methods.forEach(m => {
+    options[m] = options[m] || fs[m]
+    m = m + 'Sync'
+    options[m] = options[m] || fs[m]
+  })
+
+  options.maxBusyTries = options.maxBusyTries || 3
+  options.emfileWait = options.emfileWait || 1000
+  if (options.glob === false) {
+    options.disableGlob = true
+  }
+  if (options.disableGlob !== true && glob === undefined) {
+    throw Error('glob dependency not found, set `options.disableGlob = true` if intentional')
+  }
+  options.disableGlob = options.disableGlob || false
+  options.glob = options.glob || defaultGlobOpts
+}
+
+const rimraf = (p, options, cb) => {
+  if (typeof options === 'function') {
+    cb = options
+    options = {}
+  }
+
+  assert(p, 'rimraf: missing path')
+  assert.equal(typeof p, 'string', 'rimraf: path should be a string')
+  assert.equal(typeof cb, 'function', 'rimraf: callback function required')
+  assert(options, 'rimraf: invalid options argument provided')
+  assert.equal(typeof options, 'object', 'rimraf: options should be object')
+
+  defaults(options)
+
+  let busyTries = 0
+  let errState = null
+  let n = 0
+
+  const next = (er) => {
+    errState = errState || er
+    if (--n === 0)
+      cb(errState)
+  }
+
+  const afterGlob = (er, results) => {
+    if (er)
+      return cb(er)
+
+    n = results.length
+    if (n === 0)
+      return cb()
+
+    results.forEach(p => {
+      const CB = (er) => {
+        if (er) {
+          if ((er.code === "EBUSY" || er.code === "ENOTEMPTY" || er.code === "EPERM") &&
+              busyTries < options.maxBusyTries) {
+            busyTries ++
+            // try again, with the same exact callback as this one.
+            return setTimeout(() => rimraf_(p, options, CB), busyTries * 100)
+          }
+
+          // this one won't happen if graceful-fs is used.
+          if (er.code === "EMFILE" && timeout < options.emfileWait) {
+            return setTimeout(() => rimraf_(p, options, CB), timeout ++)
+          }
+
+          // already gone
+          if (er.code === "ENOENT") er = null
+        }
+
+        timeout = 0
+        next(er)
+      }
+      rimraf_(p, options, CB)
+    })
+  }
+
+  if (options.disableGlob || !glob.hasMagic(p))
+    return afterGlob(null, [p])
+
+  options.lstat(p, (er, stat) => {
+    if (!er)
+      return afterGlob(null, [p])
+
+    glob(p, options.glob, afterGlob)
+  })
+
+}
+
+// Two possible strategies.
+// 1. Assume it's a file.  unlink it, then do the dir stuff on EPERM or EISDIR
+// 2. Assume it's a directory.  readdir, then do the file stuff on ENOTDIR
+//
+// Both result in an extra syscall when you guess wrong.  However, there
+// are likely far more normal files in the world than directories.  This
+// is based on the assumption that a the average number of files per
+// directory is >= 1.
+//
+// If anyone ever complains about this, then I guess the strategy could
+// be made configurable somehow.  But until then, YAGNI.
+const rimraf_ = (p, options, cb) => {
+  assert(p)
+  assert(options)
+  assert(typeof cb === 'function')
+
+  // sunos lets the root user unlink directories, which is... weird.
+  // so we have to lstat here and make sure it's not a dir.
+  options.lstat(p, (er, st) => {
+    if (er && er.code === "ENOENT")
+      return cb(null)
+
+    // Windows can EPERM on stat.  Life is suffering.
+    if (er && er.code === "EPERM" && isWindows)
+      fixWinEPERM(p, options, er, cb)
+
+    if (st && st.isDirectory())
+      return rmdir(p, options, er, cb)
+
+    options.unlink(p, er => {
+      if (er) {
+        if (er.code === "ENOENT")
+          return cb(null)
+        if (er.code === "EPERM")
+          return (isWindows)
+            ? fixWinEPERM(p, options, er, cb)
+            : rmdir(p, options, er, cb)
+        if (er.code === "EISDIR")
+          return rmdir(p, options, er, cb)
+      }
+      return cb(er)
+    })
+  })
+}
+
+const fixWinEPERM = (p, options, er, cb) => {
+  assert(p)
+  assert(options)
+  assert(typeof cb === 'function')
+
+  options.chmod(p, 0o666, er2 => {
+    if (er2)
+      cb(er2.code === "ENOENT" ? null : er)
+    else
+      options.stat(p, (er3, stats) => {
+        if (er3)
+          cb(er3.code === "ENOENT" ? null : er)
+        else if (stats.isDirectory())
+          rmdir(p, options, er, cb)
+        else
+          options.unlink(p, cb)
+      })
+  })
+}
+
+const fixWinEPERMSync = (p, options, er) => {
+  assert(p)
+  assert(options)
+
+  try {
+    options.chmodSync(p, 0o666)
+  } catch (er2) {
+    if (er2.code === "ENOENT")
+      return
+    else
+      throw er
+  }
+
+  let stats
+  try {
+    stats = options.statSync(p)
+  } catch (er3) {
+    if (er3.code === "ENOENT")
+      return
+    else
+      throw er
+  }
+
+  if (stats.isDirectory())
+    rmdirSync(p, options, er)
+  else
+    options.unlinkSync(p)
+}
+
+const rmdir = (p, options, originalEr, cb) => {
+  assert(p)
+  assert(options)
+  assert(typeof cb === 'function')
+
+  // try to rmdir first, and only readdir on ENOTEMPTY or EEXIST (SunOS)
+  // if we guessed wrong, and it's not a directory, then
+  // raise the original error.
+  options.rmdir(p, er => {
+    if (er && (er.code === "ENOTEMPTY" || er.code === "EEXIST" || er.code === "EPERM"))
+      rmkids(p, options, cb)
+    else if (er && er.code === "ENOTDIR")
+      cb(originalEr)
+    else
+      cb(er)
+  })
+}
+
+const rmkids = (p, options, cb) => {
+  assert(p)
+  assert(options)
+  assert(typeof cb === 'function')
+
+  options.readdir(p, (er, files) => {
+    if (er)
+      return cb(er)
+    let n = files.length
+    if (n === 0)
+      return options.rmdir(p, cb)
+    let errState
+    files.forEach(f => {
+      rimraf(path.join(p, f), options, er => {
+        if (errState)
+          return
+        if (er)
+          return cb(errState = er)
+        if (--n === 0)
+          options.rmdir(p, cb)
+      })
+    })
+  })
+}
+
+// this looks simpler, and is strictly *faster*, but will
+// tie up the JavaScript thread and fail on excessively
+// deep directory trees.
+const rimrafSync = (p, options) => {
+  options = options || {}
+  defaults(options)
+
+  assert(p, 'rimraf: missing path')
+  assert.equal(typeof p, 'string', 'rimraf: path should be a string')
+  assert(options, 'rimraf: missing options')
+  assert.equal(typeof options, 'object', 'rimraf: options should be object')
+
+  let results
+
+  if (options.disableGlob || !glob.hasMagic(p)) {
+    results = [p]
+  } else {
+    try {
+      options.lstatSync(p)
+      results = [p]
+    } catch (er) {
+      results = glob.sync(p, options.glob)
+    }
+  }
+
+  if (!results.length)
+    return
+
+  for (let i = 0; i < results.length; i++) {
+    const p = results[i]
+
+    let st
+    try {
+      st = options.lstatSync(p)
+    } catch (er) {
+      if (er.code === "ENOENT")
+        return
+
+      // Windows can EPERM on stat.  Life is suffering.
+      if (er.code === "EPERM" && isWindows)
+        fixWinEPERMSync(p, options, er)
+    }
+
+    try {
+      // sunos lets the root user unlink directories, which is... weird.
+      if (st && st.isDirectory())
+        rmdirSync(p, options, null)
+      else
+        options.unlinkSync(p)
+    } catch (er) {
+      if (er.code === "ENOENT")
+        return
+      if (er.code === "EPERM")
+        return isWindows ? fixWinEPERMSync(p, options, er) : rmdirSync(p, options, er)
+      if (er.code !== "EISDIR")
+        throw er
+
+      rmdirSync(p, options, er)
+    }
+  }
+}
+
+const rmdirSync = (p, options, originalEr) => {
+  assert(p)
+  assert(options)
+
+  try {
+    options.rmdirSync(p)
+  } catch (er) {
+    if (er.code === "ENOENT")
+      return
+    if (er.code === "ENOTDIR")
+      throw originalEr
+    if (er.code === "ENOTEMPTY" || er.code === "EEXIST" || er.code === "EPERM")
+      rmkidsSync(p, options)
+  }
+}
+
+const rmkidsSync = (p, options) => {
+  assert(p)
+  assert(options)
+  options.readdirSync(p).forEach(f => rimrafSync(path.join(p, f), options))
+
+  // We only end up here once we got ENOTEMPTY at least once, and
+  // at this point, we are guaranteed to have removed all the kids.
+  // So, we know that it won't be ENOENT or ENOTDIR or anything else.
+  // try really hard to delete stuff on windows, because it has a
+  // PROFOUNDLY annoying habit of not closing handles promptly when
+  // files are deleted, resulting in spurious ENOTEMPTY errors.
+  const retries = isWindows ? 100 : 1
+  let i = 0
+  do {
+    let threw = true
+    try {
+      const ret = options.rmdirSync(p, options)
+      threw = false
+      return ret
+    } finally {
+      if (++i < retries && threw)
+        continue
+    }
+  } while (true)
+}
+
+module.exports = rimraf
+rimraf.sync = rimrafSync
 
 
 /***/ }),
@@ -23980,6 +23830,25 @@ function coerce (version, options) {
     '.' + (match[3] || '0') +
     '.' + (match[4] || '0'), options)
 }
+
+
+/***/ }),
+
+/***/ 4111:
+/***/ ((module) => {
+
+"use strict";
+
+module.exports = path => {
+	const isExtendedLengthPath = /^\\\\\?\\/.test(path);
+	const hasNonAscii = /[^\u0000-\u0080]+/.test(path); // eslint-disable-line no-control-regex
+
+	if (isExtendedLengthPath || hasNonAscii) {
+		return path;
+	}
+
+	return path.replace(/\\/g, '/');
+};
 
 
 /***/ }),
