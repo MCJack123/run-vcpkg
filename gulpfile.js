@@ -38,6 +38,13 @@ var eslinter = function () {
     .pipe(eslint.failAfterError());
 }
 
+// Copy the assets-lib provided matchers.
+var copyMatchersJson = function () {
+  return gulp.src(
+    ['./node_modules/@lukka/assets-lib/src/matchers/*.json'])
+    .pipe(gulp.dest('./dist/'));
+}
+
 var test = function () {
   return gulp.src('__tests__').pipe(jest({
     "preprocessorIgnorePatterns": [
@@ -49,8 +56,9 @@ var test = function () {
 
 gulp.task('test', test);
 gulp.task('eslint', eslinter);
+gulp.task('copyMatchersJson', copyMatchersJson);
 gulp.task('build', build);
 gulp.task('installPackages', installPackages);
 // 'test' must not be part of the 'default' target, as it is started explicitly *after* ncc has been run by the package.json run script.
-gulp.task('default', gulp.series('installPackages', 'eslint', 'build'));
+gulp.task('default', gulp.series('installPackages', 'eslint', 'build', 'copyMatchersJson'));
 

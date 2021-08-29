@@ -6,45 +6,65 @@ name: 'run-vcpkg'
 description: 'Run vcpkg to build C/C++ dependencies and cache them automatically.'
 author: 'Luca Cappa https://github.com/lukka'
 inputs:
-  additionalCachedPaths:
-    required: false
-    description: "Specify a semi-colon separated list of additional paths to be cached."
-  appendedCacheKey:
-    required: false
-    description: "This value is added to the precomputed key used to restore/save the cached artifacts produced by vcpkg."
-  vcpkgGitCommitId:
-    required: false
-    description: "Specify the full SHA-1 hash of a Git commit (not a branch name, nor a tag!) that establishes which version of vcpkg needs to be used. When using vcpkg as a Git submodule, this input is *not* needed as implicitly specified by the submodule."
   vcpkgDirectory:
     default: ${{ github.workspace }}/vcpkg
     required: false
-    descriptions: "Specify the vcpkg's root directory. If not specified, it defaults to  <github.workspace>/vcpkg. When vcpkg is a Git submodule, specify the full path to it."
+    descriptions: "Specify the vcpkg's root directory. If not specified, it defaults to  <github.workspace>/vcpkg/ . When vcpkg is a Git submodule, specify the path to it."
+  vcpkgJsonGlob:
+    default: '**/vcpkg.json'
+    required: false
+    description: "Specify the glob expression used to find vcpkg.json whose content's hash is added to the cache key."
+  appendedCacheKey:
+    required: false
+    description: "Specify a value to add to the cache key."
+  additionalCachedPaths:
+    required: false
+    description: "Specify a semi-colon separated list of additional paths to be cached."
+  vcpkgGitCommitId:
+    required: false
+    description: "Specify the full SHA-1 hash of a Git commit (not a branch name, nor a tag!) that establishes which version of vcpkg needs to be used. When using vcpkg as a Git submodule, this input is *not* needed as implicitly specified by the submodule."
   vcpkgGitURL:
     default: "https://github.com/microsoft/vcpkg.git"
     required: false
     description: "Specify the URL Git repository to download vcpkg from. Defaults to https://github.com/microsoft/vcpkg.git"
+  runVcpkgFormatString:
+    default: 'install --recurse --clean-after-build'
+    required: false
+    description: "Specify the command line to run vcpkg with."
   doNotUpdateVcpkg: 
     default: false
     required: false
     description: "Avoid to update vcpkg (launching git) in the specified 'vcpkgDirectory'. This is useful when vcpkg is being checkout independently of the run-vcpkg action. Default is false."
+  doRunVcpkgInstall:
+    default: false
+    required: false
+    description: "Run the installation of package by explicitly running `vcpkg install`. Default is false."
   useShell:
     default: true
     required: false
     description: "Specify which shell to be used when launching commands. 'true' means the default shell is used. 'false' means no shell is used. It also can be an absolute path and arguments of the shell to spawn commands with."
-  doNotCache: 
+  doNotCache:
     default: false
     required: false
     description: "Disable the automatic caching mechanism by setting it to true. Default is false."
+  doNotCacheOnWorkflowFailure:
+    default: false
+    required: false
+    description: "Disable the saving of the cache if the workflow failed."
   logCollectionRegExps:
     default: "\\s*\"(.+CMakeOutput\\.log)\"\\.\\s*;\\s*\"(.+CMakeError\\.log)\"\\.\\s*;\\s*(.+out\\.log)\\s*;\\s+(.+err\\.log)\\s*"
     required: false
     description: "Specifies a semicolon separated list of regular expressions that are used to identify log file paths in the workflow output. A regular expression must have a single capturing group, that is a single pair of parenthesis such as 'See also (.+.log)'. When a match occurs, the content of the file is written into the workflow output for disclosing its content to the user. The default regular expressions are for CMake's and vcpkg's log files."
+  jobStatus: 
+    default: ${{ job.status }}
+    required: false
+    description: "Do not set nor use. It is used to get the status of the job and decide whether to save cache on the post action run at the end of the job."
 
 runs:
   using: 'node12'
   main: 'dist/index.js'
   post: 'dist/post/index.js'
-  post-if: 'success()'
+  post-if: 'always()'
 
 branding:
   icon: 'terminal'  

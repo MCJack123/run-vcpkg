@@ -5,13 +5,16 @@
 import * as path from 'path'
 import * as core from '@actions/core'
 import * as cache from '@actions/cache'
-import { BaseUtilLib } from '@lukka/base-util-lib'
+import * as baseutillib from '@lukka/base-util-lib'
 import * as runvcpkglib from '@lukka/run-vcpkg-lib'
 import * as vcpkgutil from './vcpkg-utils'
 
 // Input names for run-vcpkg only.
-export const doNotCacheInput = 'doNotCache';
-export const additionalCachedPathsInput = 'additionalCachedPaths';
+export const doNotCacheInput = 'DONOTCACHE';
+export const additionalCachedPathsInput = 'ADDITIONALCACHEDPATHS';
+export const jobStatusInput = 'JOBSTATUS';
+export const doNotCacheOnWorkflowFailureInput = 'DONOTCACHEONWORKFLOWFAILURE';
+export const vcpkgJsonGlobInput = 'VCPKGJSONGLOB';
 
 /**
  * The input's name for additional content for the cache key.
@@ -19,88 +22,77 @@ export const additionalCachedPathsInput = 'additionalCachedPaths';
 export const appendedCacheKeyInput = 'appendedCacheKey';
 
 // Saved data in the action, and consumed by post-action.
-export const VCPKG_CACHE_COMPUTED_KEY = "VCPKG_CACHE_COMPUTED_KEY";
-export const VCPKG_CACHE_HIT_KEY = "VCPKG_CACHE_HIT_KEY";
-export const VCPKG_DO_NOT_CACHE_KEY = "VCPKG_DO_NOT_CACHE_KEY";
-export const VCPKG_ADDED_CACHEKEY_KEY = "VCPKG_ADDED_CACHEKEY_KEY";
-export const VCPKG_ROOT_KEY = "VCPKG_ROOT_KEY";
-export const VCPKG_DO_CACHE_ON_POST_ACTION_KEY = "VCPKG_DO_CACHE_ON_POST_ACTION_KEY";
+export const VCPKG_CACHE_COMPUTEDKEY_STATE = "VCPKG_CACHE_COMPUTEDKEY_STATE";
+export const VCPKG_KEY_CACHE_HIT_STATE = "VCPKG_KEY_CACHE_HIT_STATE";
+export const VCPKG_DO_NOT_CACHE_STATE = "VCPKG_DO_NOT_CACHE_STATE";
+export const VCPKG_ADDED_CACHEKEY_STATE = "VCPKG_ADDED_CACHEKEY_STATE";
+export const VCPKG_ROOT_STATE = "VCPKG_ROOT_STATE";
+export const VCPKG_ADDITIONAL_CACHED_PATHS_STATE = "VCPKG_ADDITIONAL_CACHED_PATHS_STATE";
 
 export class VcpkgAction {
 
   private readonly doNotCache: boolean = false;
-  private hitCacheKey: string | undefined;
   private readonly appendedCacheKey: string;
   private readonly vcpkgRootDir: string;
+  private readonly runVcpkgCmdString: string;
+  private readonly vcpkgJsonGlob: string;
+  private readonly userProvidedCommitId: string;
+  private hitCacheKey: string | undefined;
 
-  constructor(private baseUtilLib: BaseUtilLib) {
+  constructor(private baseUtilLib: baseutillib.BaseUtilLib) {
+    // Fetch inputs.
     this.doNotCache = core.getInput(doNotCacheInput).toLowerCase() === "true";
-    core.saveState(VCPKG_DO_NOT_CACHE_KEY, this.doNotCache ? "true" : "false");
     this.appendedCacheKey = core.getInput(appendedCacheKeyInput);
     this.vcpkgRootDir = path.normalize(core.getInput(runvcpkglib.vcpkgDirectory));
-    vcpkgutil.Utils.ensureDirExists(this.vcpkgRootDir);
-    core.saveState(VCPKG_ROOT_KEY, this.vcpkgRootDir);
-    vcpkgutil.Utils.addCachedPaths(core.getInput(additionalCachedPathsInput));
+    this.userProvidedCommitId = core.getInput(runvcpkglib.vcpkgCommitId);
+    console.log(core.getInput(additionalCachedPathsInput));
+    vcpkgutil.Utils.addCachedPaths(baseUtilLib.baseLib, core.getInput(additionalCachedPathsInput));
+    this.runVcpkgCmdString = core.getInput(runvcpkglib.runVcpkgCmdString);
+    this.vcpkgJsonGlob = core.getInput(vcpkgJsonGlobInput);
+    // Save state for post action.
+    baseUtilLib.baseLib.setState(VCPKG_DO_NOT_CACHE_STATE, this.doNotCache ? "true" : "false");
+    baseUtilLib.baseLib.setState(VCPKG_ROOT_STATE, this.vcpkgRootDir);
   }
 
   public async run(): Promise<void> {
-    const restoreKeys: string[] = await vcpkgutil.Utils.computeCacheKey(this.appendedCacheKey);
-    const vcpkgCacheComputedKey = restoreKeys[0];
-    if (!vcpkgCacheComputedKey) {
-      core.error("Computation for the cache key failed!");
+    await this.baseUtilLib.baseLib.mkdirP(this.vcpkgRootDir);
+    const keys: baseutillib.KeySet = await vcpkgutil.Utils.computeCacheKeys(
+      this.baseUtilLib, this.vcpkgJsonGlob, this.vcpkgRootDir, this.userProvidedCommitId, this.appendedCacheKey);
+    if (!keys) {
+      this.baseUtilLib.baseLib.error("Computation for the cache key failed!");
     } else {
-      core.saveState(VCPKG_CACHE_COMPUTED_KEY, vcpkgCacheComputedKey);
+      this.baseUtilLib.baseLib.setState(VCPKG_CACHE_COMPUTEDKEY_STATE, JSON.stringify(keys));
       await this.baseUtilLib.wrapOp('Restore vcpkg and its artifacts from cache',
-        () => this.restoreCache(restoreKeys));
-      const runner: runvcpkglib.VcpkgRunner = new runvcpkglib.VcpkgRunner(this.baseUtilLib.baseLib);
-      await runner.run();
+        () => this.restoreCache(keys));
 
-      core.saveState(VCPKG_DO_CACHE_ON_POST_ACTION_KEY, "true");
+      await runvcpkglib.VcpkgRunner.run(this.baseUtilLib.baseLib, this.runVcpkgCmdString);
     }
   }
 
-  private async saveCache(key: string): Promise<void> {
-    await vcpkgutil.Utils.saveCache(this.doNotCache, key, this.hitCacheKey,
-      vcpkgutil.Utils.getAllCachedPaths(this.baseUtilLib.baseLib, this.vcpkgRootDir));
-  }
+  private async restoreCache(keys: baseutillib.KeySet): Promise<void> {
+    if (this.doNotCache) {
+      this.baseUtilLib.baseLib.info(`Skipping as caching is disabled (${doNotCacheInput}:true)`);
+    } else {
+      const pathsToCache: string[] = vcpkgutil.Utils.getAllCachedPaths(
+        this.baseUtilLib.baseLib, this.vcpkgRootDir);
+      this.baseUtilLib.baseLib.info(`Cache key: '${keys.primary}'`);
+      this.baseUtilLib.baseLib.info(`Cache restore keys: '${keys.restore}'`);
+      this.baseUtilLib.baseLib.info(`Cached paths: '${pathsToCache}'`);
 
-  private async restoreCache(restoreKeys: string[]): Promise<void> {
-    try {
-      if (this.doNotCache) {
-        core.info(`Caching is disabled (${doNotCacheInput}=true)`);
-      } else {
-        const pathsToCache: string[] = vcpkgutil.Utils.getAllCachedPaths(this.baseUtilLib.baseLib, this.vcpkgRootDir);
-        const primaryKey = restoreKeys.shift() as string;
-        core.info(`Cache key: '${primaryKey}'`);
-        core.info(`Cache restore keys: '${restoreKeys}'`);
-        core.info(`Cached paths: '${pathsToCache}'`);
-
-        let cacheHitId: string | undefined;
-        try {
-          cacheHitId = await cache.restoreCache(pathsToCache, primaryKey, restoreKeys);
-        }
-        catch (err) {
-          try {
-            core.warning(`restoreCache() failed once: '${err?.toString()}' , retrying...`);
-            cacheHitId = await cache.restoreCache(pathsToCache, primaryKey, restoreKeys);
-          }
-          catch (err) {
-            core.warning(`restoreCache() failed again: '${err?.toString()}'.`);
-          }
-        }
-
-        if (cacheHitId) {
-          core.info(`Cache hit, id=${cacheHitId}.`);
-          this.hitCacheKey = cacheHitId;
-          core.saveState(VCPKG_CACHE_HIT_KEY, cacheHitId);
-        } else {
-          core.info(`Cache miss.`);
-        }
+      let keyCacheHit: string | undefined;
+      try {
+        keyCacheHit = await cache.restoreCache(pathsToCache, keys.primary, keys.restore);
       }
-    } catch (err) {
-      const error: Error = err as Error;
-      if (error?.stack) {
-        core.info(error.stack);
+      catch (err) {
+        this.baseUtilLib.baseLib.warning(`cache.restoreCache() failed: '${(err as Error)?.message ?? "<undefined error>"}', skipping restoring from cache.`);
+      }
+
+      if (keyCacheHit) {
+        this.baseUtilLib.baseLib.info(`Cache hit, key='${keyCacheHit}'.`);
+        this.hitCacheKey = keyCacheHit;
+        this.baseUtilLib.baseLib.setState(VCPKG_KEY_CACHE_HIT_STATE, keyCacheHit);
+      } else {
+        this.baseUtilLib.baseLib.info(`Cache miss.`);
       }
     }
   }

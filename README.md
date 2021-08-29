@@ -19,7 +19,7 @@ The **run-vcpkg** action restores from cache [vcpkg](https://github.com/microsof
     - Saving to cache happens at the end of the workflow in case `setupOnly: true`, otherwise it happens at the end of the action execution.
 
 Special features: 
-  
+
   - automatic dump of log files created by `CMake` (e.g., `CMakeOutput.log`) and `vcpkg`. The content of those files flow into the workflow output log.
 
 The provided [samples](#samples) use [GitHub hosted runners](https://help.github.com/en/actions/automating-your-workflow-with-github-actions/virtual-environments-for-github-hosted-runners).
