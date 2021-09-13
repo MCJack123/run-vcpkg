@@ -322,9 +322,7 @@ class Utils {
             }
             key += "-args=" + Utils.hashCode(core.getInput(runvcpkglib.vcpkgArguments));
             key += "-os=" + Utils.hashCode(process.env.ImageOS ? process.env.ImageOS : process.platform);
-            if (process.env.ImageVersion) {
-                key += "-imageVer=" + Utils.hashCode(process.env.ImageVersion);
-            }
+            key += "-imageVer=-2119121288";
             key += "-appendedKey=" + Utils.hashCode(appendedCacheKey);
             // Add the triplet only if it is provided.
             const triplet = core.getInput(runvcpkglib.vcpkgTriplet);
